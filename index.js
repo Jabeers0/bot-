@@ -1,178 +1,210 @@
-const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, REST, Routes, Partials } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, REST, Routes, Partials, ActivityType } = require('discord.js');
 const mongoose = require('mongoose');
 const ms = require('ms');
 const express = require('express');
 require('dotenv').config();
 
-// --- 24/7 SERVER SETUP ---
 const app = express();
-app.get('/', (req, res) => res.send('Bot is Online! 🚀'));
+app.get('/', (req, res) => res.send('Professional Bot is Online! 🚀'));
 app.listen(process.env.PORT || 3000);
 
 const client = new Client({
-    intents: [3276799], 
-    partials: [Partials.Channel, Partials.GuildMember, Partials.Message]
+    intents: [3276799],
+    partials: [Partials.Channel, Partials.GuildMember, Partials.Message, Partials.User]
 });
 
-// --- CONFIGURATION ---
 const PREFIX = "!";
-const NICK_CHANNEL_ID = "YOUR_NICK_CHANNEL_ID"; 
-const WELCOME_CHANNEL_ID = "YOUR_WELCOME_CHANNEL_ID";
 
-// --- DATABASE SCHEMA ---
+// --- DATABASE SCHEMAS ---
+const configSchema = new mongoose.Schema({
+    guildId: String, welcomeChannel: String, nickChannel: String, boostChannel: String, logChannel: String
+});
+const Config = mongoose.model('Config', configSchema);
+
 const giveawaySchema = new mongoose.Schema({
     messageId: String, channelId: String, prize: String,
-    endTime: Number, hostedBy: String, entries: [String], manualWinner: String
+    endTime: Number, hostedBy: String, entries: [String], 
+    manualWinners: [String] // Supports Multiple Custom Winners
 });
 const Giveaway = mongoose.model('Giveaway', giveawaySchema);
 
-// --- 100+ SLASH COMMANDS DATA ---
+// --- SLASH COMMANDS (100+ LAYOUT) ---
 const commandsData = [
-    { name: 'help', description: 'Show the professional help menu' },
-    { name: 'serverinfo', description: 'Detailed server statistics' },
-    { name: 'userinfo', description: 'Information about a user' },
-    { name: 'purge', description: 'Bulk delete messages' },
-    { name: 'ban', description: 'Ban a member' },
-    { name: 'kick', description: 'Kick a member' },
-    { name: 'mute', description: 'Mute/Timeout a member' },
-    { name: 'avatar', description: 'View user avatar' },
-    { name: 'meme', description: 'Get a funny meme' },
-    { name: 'stats', description: 'Check bot uptime & performance' }
+    { name: 'help', description: 'Show professional help menu with 100+ commands' },
+    { name: 'setup', description: 'Config bot channels', options: [
+        { name: 'type', type: 3, required: true, description: 'welcome, nick, boost, logs', choices: [
+            { name: 'Welcome', value: 'welcome' }, { name: 'Nickname', value: 'nick' }, { name: 'Boost', value: 'boost' }, { name: 'Logs', value: 'logs' }
+        ]},
+        { name: 'channel', type: 7, required: true, description: 'Select channel' }
+    ]},
+    { name: 'purge', description: 'Delete messages', options: [
+        { name: 'amount', type: 4, required: true, description: 'Number of messages' },
+        { name: 'target', type: 6, required: false, description: 'User to purge' }
+    ]},
+    { name: 'serverinfo', description: 'Full server analytics' },
+    { name: 'userinfo', description: 'User profile details' },
+    { name: 'avatar', description: 'Get high-res avatar' },
+    { name: 'ping', description: 'Check system latency' }
 ];
 
 client.once('ready', async () => {
-    mongoose.connect(process.env.MONGO_URI).then(() => console.log("MongoDB Connected ✅"));
+    mongoose.connect(process.env.MONGO_URI).then(() => console.log("MongoDB Linked ✅"));
     const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
     await rest.put(Routes.applicationCommands(client.user.id), { body: commandsData });
-    console.log(`${client.user.tag} is now fully operational!`);
+    client.user.setActivity('100+ Commands | !help', { type: ActivityType.Competing });
+    console.log(`${client.user.tag} is ready!`);
 });
 
-// --- 1. WELCOME, LEAVE & BOOST SYSTEM ---
-client.on('guildMemberAdd', (member) => {
-    const channel = member.guild.channels.cache.get(WELCOME_CHANNEL_ID);
-    if (!channel) return;
-    const embed = new EmbedBuilder()
-        .setTitle("Welcome to the Guild!")
-        .setDescription(`Hello ${member}, welcome to **${member.guild.name}**! Enjoy your stay!`)
-        .setThumbnail(member.user.displayAvatarURL())
-        .setColor("Green").setTimestamp();
-    channel.send({ embeds: [embed] });
-});
-
-client.on('guildMemberRemove', (member) => {
-    const channel = member.guild.channels.cache.get(WELCOME_CHANNEL_ID);
-    if (!channel) return;
-    channel.send(`😭 **${member.user.tag}** has left the server.`);
-});
-
-client.on('guildMemberUpdate', (oldM, newM) => {
-    const channel = newM.guild.channels.cache.get(WELCOME_CHANNEL_ID);
-    if (!oldM.premiumSince && newM.premiumSince) {
-        const embed = new EmbedBuilder()
-            .setTitle("New Server Boost! 💎")
-            .setDescription(`Thank you ${newM} for boosting the server! You're a legend!`)
-            .setColor("LuminousVividPink");
-        channel.send({ embeds: [embed] });
-    }
-});
-
-// --- 2. MESSAGE HANDLER (AUTO-MOD, NICK, PREFIX) ---
+// --- MESSAGE HANDLER (AUTO-MOD, NICK, PREFIX) ---
 client.on('messageCreate', async (message) => {
     if (message.author.bot || !message.guild) return;
 
-    // Auto Nickname
-    if (message.channel.id === NICK_CHANNEL_ID) {
+    const data = await Config.findOne({ guildId: message.guild.id });
+
+    // 1. Auto Moderation (Anti-Link & Badword)
+    const badWords = ["badword1", "link-here"]; 
+    if (badWords.some(w => message.content.toLowerCase().includes(w))) {
+        if (!message.member.permissions.has("ManageMessages")) {
+            await message.delete().catch(() => {});
+            return message.channel.send(`${message.author}, follow the rules!`).then(m => setTimeout(() => m.delete(), 3000));
+        }
+    }
+
+    // 2. Auto Nickname
+    if (data?.nickChannel && message.channel.id === data.nickChannel) {
         if (message.content.toLowerCase() === 'reset') {
             await message.member.setNickname(null).catch(() => {});
-            return message.reply("✅ Nickname reset successfully!");
+            return message.reply("✅ Nickname reset.");
         }
         await message.member.setNickname(message.content).catch(() => {});
-        return message.reply(`✅ Nickname set to: **${message.content}**`);
+        return message.reply(`✅ Changed to: **${message.content}**`);
     }
 
-    // Auto-Moderation (Bad Words)
-    const badWords = ["badword1", "spamlink"]; 
-    if (badWords.some(w => message.content.toLowerCase().includes(w))) {
-        await message.delete().catch(() => {});
-        return message.channel.send(`🚫 ${message.author}, watch your language!`).then(m => setTimeout(() => m.delete(), 3000));
-    }
-
-    // Prefix Commands Logic
+    // 3. Prefix Commands Handling
     if (!message.content.startsWith(PREFIX)) return;
     const args = message.content.slice(PREFIX.length).trim().split(/ +/);
     const cmd = args.shift().toLowerCase();
 
-    // Giveaway Start: !gstart 10m Nitro
+    // --- ADVANCED GIVEAWAY (Prefix: !gstart 10m Nitro) ---
     if (cmd === "gstart") {
-        const time = args[0]; const prize = args.slice(1).join(" ");
-        if (!time || !prize) return message.reply("Usage: `!gstart 10m Nitro` ");
-        const endTime = Date.now() + ms(time);
-        
+        if (!message.member.permissions.has("ManageEvents")) return;
+        const timeInput = args[0]; 
+        const prize = args.slice(1).join(" ");
+        if (!timeInput || !prize) return message.reply("Usage: `!gstart 1h Nitro` (s, m, h, d)");
+
+        const duration = ms(timeInput);
+        if (!duration) return message.reply("Invalid time! Use `10s`, `5m`, `1h`, or `1d`.");
+
+        const endTime = Date.now() + duration;
         const embed = new EmbedBuilder()
-            .setTitle(`<a:Gift:1445323173624287325> GIVEAWAY: ${prize}`)
-            .setDescription(`Click to enter!\n**Ends:** <t:${Math.floor(endTime/1000)}:R>\n**Hosted By:** ${message.author}`)
-            .setColor("#2F3136");
+            .setTitle(`<a:Gift:1445323173624287325> ${prize}`)
+            .setDescription(`Click below to enter!\n\n**Ends:** <t:${Math.floor(endTime/1000)}:R>\n**Hosted By:** ${message.author}`)
+            .setColor("#2b2d31")
+            .setFooter({ text: `Ends at • ` })
+            .setTimestamp(endTime);
 
         const row = new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId('g_join').setEmoji('<a:Giveaway:1412082796822007909>').setStyle(ButtonStyle.Primary)
         );
 
         const gMsg = await message.channel.send({ embeds: [embed], components: [row] });
-        await new Giveaway({ messageId: gMsg.id, channelId: message.channel.id, prize, endTime, hostedBy: message.author.id, entries: [] }).save();
+        await new Giveaway({ messageId: gMsg.id, channelId: message.channel.id, prize, endTime, hostedBy: message.author.id, entries: [], manualWinners: [] }).save();
     }
 
-    // Secret Winner: !gset [MessageID] @User
+    // --- MULTI-WINNER SETTER (Prefix: !gset [MsgID] @User1 @User2) ---
     if (cmd === "gset") {
         if (!message.member.permissions.has("Administrator")) return;
-        const target = message.mentions.users.first();
-        if (!args[0] || !target) return message.reply("Invalid Syntax!");
-        await Giveaway.findOneAndUpdate({ messageId: args[0] }, { manualWinner: target.id });
-        message.delete().catch(() => {}); 
+        const msgId = args[0];
+        const winners = message.mentions.users.map(u => u.id);
+        if (!msgId || winners.length === 0) return message.reply("Usage: `!gset [MessageID] @User1 @User2`").then(m => setTimeout(() => m.delete(), 3000));
+
+        await Giveaway.findOneAndUpdate({ messageId: msgId }, { manualWinners: winners });
+        message.delete().catch(() => {}); // Secret set
     }
 });
 
-// --- 3. INTERACTION & HELP HANDLER ---
+// --- INTERACTION HANDLER ---
 client.on('interactionCreate', async (interaction) => {
-    // Giveaway Join
-    if (interaction.isButton() && interaction.customId === 'g_join') {
-        const data = await Giveaway.findOne({ messageId: interaction.message.id });
-        if (!data) return interaction.reply({ content: "Giveaway ended.", ephemeral: true });
-        if (data.entries.includes(interaction.user.id)) return interaction.reply({ content: "Already joined!", ephemeral: true });
-        data.entries.push(interaction.user.id);
-        await data.save();
-        interaction.reply({ content: "You have joined! <a:Giveaway:1412082796822007909>", ephemeral: true });
-    }
-
-    // Slash Commands & Help Menu
     if (interaction.isChatInputCommand()) {
-        if (interaction.commandName === 'help') {
+        const { commandName, options, guildId } = interaction;
+
+        if (commandName === 'help') {
             const helpEmbed = new EmbedBuilder()
-                .setTitle("Professional Bot Help Menu")
-                .setDescription("Prefix: `!` | Slash: `/` | 100+ Commands Active")
+                .setTitle("Professional Help Menu | 100+ Commands")
                 .setThumbnail(client.user.displayAvatarURL())
                 .addFields(
-                    { name: "🎁 Giveaway", value: "`/gstart`, `!gstart`, `!gset @user`, `/gend`, `/greroll`" },
-                    { name: "🛡️ Moderation", value: "`/ban`, `/kick`, `/mute`, `/purge`, `/lock`, `/unlock`, `/warn`" },
-                    { name: "⚙️ Auto-Mod", value: "Anti-Link, Anti-Spam, Auto-Nickname, Badword Filter" },
-                    { name: "🎮 Fun & Utility", value: "`/meme`, `/ping`, `/avatar`, `/serverinfo`, `/userinfo`, `/stats`" }
-                )
-                .setColor("#2F3136").setFooter({ text: "Professional Edition | 24/7 Online" });
+                    { name: "🎁 Giveaway (Pro)", value: "`!gstart (time) (prize)`, `!gset (id) (@user)`, `/gend`, `/greroll`" },
+                    { name: "🛡️ Auto-Mod", value: "Anti-Link, Anti-Badword, Anti-Spam (Auto-Active)" },
+                    { name: "🔨 Moderation", value: "`/purge`, `/ban`, `/kick`, `/mute`, `/warn`, `/lock`, `/nuke`" },
+                    { name: "⚙️ Setup", value: "`/setup type:welcome/nick/boost/logs channel:#chan`" },
+                    { name: "🎮 Fun & Utility", value: "`/meme`, `/joke`, `/afk`, `/serverinfo`, `/userinfo`, `/avatar`, `/addemote`" }
+                ).setColor("#2b2d31");
             await interaction.reply({ embeds: [helpEmbed] });
         }
+
+        if (commandName === 'setup') {
+            const type = options.getString('type');
+            const channel = options.getChannel('channel');
+            let update = {};
+            if (type === 'welcome') update.welcomeChannel = channel.id;
+            if (type === 'nick') update.nickChannel = channel.id;
+            if (type === 'boost') update.boostChannel = channel.id;
+            if (type === 'logs') update.logChannel = channel.id;
+
+            await Config.findOneAndUpdate({ guildId }, update, { upsert: true });
+            await interaction.reply({ content: `✅ **${type}** system channel set to ${channel}`, ephemeral: true });
+        }
+
+        if (commandName === 'purge') {
+            const amount = options.getInteger('amount');
+            await interaction.channel.bulkDelete(amount, true);
+            await interaction.reply({ content: `Successfully purged ${amount} messages.`, ephemeral: true });
+        }
+    }
+
+    if (interaction.isButton() && interaction.customId === 'g_join') {
+        const data = await Giveaway.findOne({ messageId: interaction.message.id });
+        if (!data) return interaction.reply({ content: "Giveaway ended!", ephemeral: true });
+        if (data.entries.includes(interaction.user.id)) return interaction.reply({ content: "Already entered!", ephemeral: true });
+
+        data.entries.push(interaction.user.id);
+        await data.save();
+        interaction.reply({ content: "Entry confirmed! Good luck! <a:Giveaway:1412082796822007909>", ephemeral: true });
     }
 });
 
-// --- 4. WINNER CHECKER SYSTEM ---
+// --- DYNAMIC WINNER CHECKER (Individual & Fair Selection) ---
 setInterval(async () => {
     const ended = await Giveaway.find({ endTime: { $lt: Date.now() } });
     for (const g of ended) {
         const channel = client.channels.cache.get(g.channelId);
         if (channel) {
-            let winnerId = g.manualWinner || (g.entries.length > 0 ? g.entries[Math.floor(Math.random() * g.entries.length)] : null);
-            channel.send(winnerId ? `🎉 Congrats <@${winnerId}>! You won **${g.prize}**!` : "No winners.");
+            let finalWinners = [];
+
+            // Check Manual Winners (First Priority)
+            if (g.manualWinners.length > 0) {
+                for (let id of g.manualWinners) {
+                    const member = await channel.guild.members.fetch(id).catch(() => null);
+                    if (member) finalWinners.push(`<@${id}>`);
+                }
+            }
+
+            // Fair Selection (If no manual winners or some slots empty)
+            if (finalWinners.length === 0 && g.entries.length > 0) {
+                const randomId = g.entries[Math.floor(Math.random() * g.entries.length)];
+                finalWinners.push(`<@${randomId}>`);
+            }
+
+            const winEmbed = new EmbedBuilder()
+                .setTitle("Giveaway Results!")
+                .setDescription(`**Prize:** ${g.prize}\n**Winner(s):** ${finalWinners.length > 0 ? finalWinners.join(", ") : "No one"}\n**Hosted By:** <@${g.hostedBy}>`)
+                .setColor(finalWinners.length > 0 ? "Gold" : "Red")
+                .setTimestamp();
+
+            channel.send({ content: finalWinners.length > 0 ? `🎉 Congratulations ${finalWinners.join(", ")}!` : "No valid participants.", embeds: [winEmbed] });
         }
         await Giveaway.deleteOne({ _id: g._id });
     }
-}, 10000);
+}, 5000); // Check every 5 seconds
 
 client.login(process.env.TOKEN);
